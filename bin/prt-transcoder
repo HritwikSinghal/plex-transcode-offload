@@ -37,6 +37,18 @@ CONFIG_PATHS = (
     Path.home() / ".config" / "prt" / "prt.conf",
 )
 
+# Exit code the worker-side shim (prt-worker-transcoder) returns when the
+# master's expected Plex version (PRT_EXPECTED_PLEX_VERSION, forwarded below)
+# does not match the version installed on the worker. EX_CONFIG from sysexits.
+# The master treats it as a distinct, loudly-logged reason to fall back locally.
+# Until the worker half implements the check this code is never emitted, so
+# recognizing it here is backward-safe.
+VERSION_SKEW_RC = 78
+
+# ssh's own transport-error exit code (connection/auth failure, not a remote
+# command exit). Historically the ONLY trigger for local fallback.
+SSH_TRANSPORT_RC = 255
+
 # Env vars Plex Media Server passes to the transcoder that the remote
 # binary needs to behave identically. Prefix matches are checked first,
 # then exact names.
@@ -49,6 +61,10 @@ ENV_NAME_ALLOWLIST = frozenset(
         "HOME",
         "PATH",
         "TERM",
+        # Master's expected Plex version, so the worker shim can detect skew
+        # and exit VERSION_SKEW_RC. Exact name (not a PRT_ prefix) to keep env
+        # forwarding bounded.
+        "PRT_EXPECTED_PLEX_VERSION",
     }
 )
 
@@ -103,15 +119,18 @@ def _build_remote_command(plex_transcoder_path: str) -> str:
     )
 
 
-def _ssh_argv(cfg: configparser.ConfigParser, remote_command: str) -> list[str]:
+def _ssh_conn_opts(cfg: configparser.ConfigParser) -> tuple[list[str], str]:
+    """Connection-level ssh args shared by the transcode dispatch and the
+    health probe, plus the `user@host` target. Excludes `-tt` and the remote
+    command, which differ per call site.
+    """
     worker = cfg["worker"]
     host = worker["host"]
     user = worker.get("user", "plex")
     ssh_key = worker.get("ssh_key", "").strip()
     control_dir = cfg["paths"].get("ssh_control_dir", "/run/prt").rstrip("/")
 
-    argv = [
-        "ssh",
+    opts = [
         "-o",
         "BatchMode=yes",
         "-o",
@@ -126,18 +145,64 @@ def _ssh_argv(cfg: configparser.ConfigParser, remote_command: str) -> list[str]:
         "ServerAliveInterval=10",
         "-o",
         "ServerAliveCountMax=3",
-        # -tt forces a remote TTY so the remote process gets SIGHUP when
-        # ssh disconnects, ensuring no orphaned transcoders on master crash.
-        "-tt",
+        # Bound the connect phase so a half-dead worker can't stall dispatch;
+        # the persistent ControlMaster means the happy path skips connect
+        # entirely, so this only bites when the worker is actually unreachable.
+        "-o",
+        "ConnectTimeout=5",
     ]
     if ssh_key:
-        argv += ["-i", ssh_key]
-    argv += [f"{user}@{host}", remote_command]
-    return argv
+        opts += ["-i", ssh_key]
+    return opts, f"{user}@{host}"
+
+
+def _ssh_argv(cfg: configparser.ConfigParser, remote_command: str) -> list[str]:
+    opts, target = _ssh_conn_opts(cfg)
+    # -tt forces a remote TTY so the remote process gets SIGHUP when
+    # ssh disconnects, ensuring no orphaned transcoders on master crash.
+    return ["ssh", *opts, "-tt", target, remote_command]
+
+
+def _probe_worker(cfg: configparser.ConfigParser) -> bool:
+    """Fast reachability check used only on the failure path to label WHY a
+    job failed (transport down vs worker-side error) for the log line and the
+    future metrics hook. Reuses the ControlMaster socket, so it is near-instant
+    when the keepalive connection is up; ConnectTimeout bounds the worst case.
+    """
+    opts, target = _ssh_conn_opts(cfg)
+    try:
+        rc = subprocess.call(
+            ["ssh", *opts, target, "true"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return rc == 0
+
+
+def _evaluate_outcome(rc: int, terminated_by_plex: bool) -> tuple[str, bool]:
+    """Pure decision: map a finished dispatch to (reason, want_fallback).
+
+    A Plex-initiated termination (seek/stop) is expected to exit nonzero and
+    must NOT trigger fallback -- re-transcoding an abandoned job wastes the
+    worker. Every other nonzero outcome warrants a local fallback attempt; the
+    specific reason only steers logging/metrics.
+    """
+    if terminated_by_plex:
+        return ("cancelled", False)
+    if rc == 0:
+        return ("success", False)
+    if rc == VERSION_SKEW_RC:
+        return ("version_skew", True)
+    if rc == SSH_TRANSPORT_RC:
+        return ("transport_error", True)
+    return ("worker_error", True)
 
 
 def _fallback_local(cfg: configparser.ConfigParser) -> int:
-    """Optional local fallback when worker is unreachable."""
+    """Optional local fallback when the worker can't serve the job."""
     if not cfg["worker"].getboolean("fallback_local", fallback=False):
         return -1
     local_bin = cfg["paths"].get("plex_transcoder_backup")
@@ -176,9 +241,19 @@ def main() -> int:
             return rc
         _die(f"failed to launch ssh: {e}", code=69)  # EX_UNAVAILABLE
 
+    # Terminating signals mean Plex deliberately stopped this transcode (seek,
+    # stop, session teardown). We must remember that so the nonzero exit it
+    # produces is NOT mistaken for a worker failure and re-run locally.
+    state = {"terminated_by_plex": False}
+    TERMINATING = frozenset(
+        {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT}
+    )
+
     # Forward catchable signals to the ssh process (which propagates them
     # to the remote process group thanks to -tt).
     def _forward(signum: int, _frame) -> None:
+        if signum in TERMINATING:
+            state["terminated_by_plex"] = True
         try:
             proc.send_signal(signum)
         except ProcessLookupError:
@@ -197,17 +272,35 @@ def main() -> int:
     try:
         rc = proc.wait()
     except KeyboardInterrupt:
+        state["terminated_by_plex"] = True
         proc.send_signal(signal.SIGINT)
         rc = proc.wait()
 
-    # ssh exit codes: 255 = ssh transport error. Optionally fall back.
-    if rc == 255:
-        _log("ssh transport error; considering local fallback")
+    reason, want_fallback = _evaluate_outcome(rc, state["terminated_by_plex"])
+
+    # Version skew is operator-actionable (the master and worker Plex pins
+    # drifted) -- surface it loudly rather than burying it in a generic line.
+    if reason == "version_skew":
+        skew_msg = (
+            f"worker reported Plex version skew (rc={rc}); the worker's "
+            "transcoder version does not match PRT_EXPECTED_PLEX_VERSION. "
+            "Re-pin both nodes to the same Plex version."
+        )
+        syslog.syslog(syslog.LOG_ERR, f"prt-transcoder: {skew_msg}")
+        print(f"prt-transcoder: {skew_msg}", file=sys.stderr)
+
+    if want_fallback:
+        worker_up = _probe_worker(cfg)
+        _log(
+            f"remote transcode failed rc={rc} reason={reason} "
+            f"worker_reachable={worker_up}; attempting local fallback"
+        )
         local_rc = _fallback_local(cfg)
         if local_rc >= 0:
+            _log(f"local fallback finished rc={local_rc}")
             return local_rc
 
-    _log(f"transcode finished rc={rc}")
+    _log(f"transcode finished rc={rc} reason={reason}")
     return rc
 
 
