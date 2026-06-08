@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# prt-status — diagnose the master <-> worker transcode offload pipeline.
+# Run on the master. No args.
+
+set -u
+
+CONF="/etc/prt/prt.conf"
+KEY="/var/lib/plex/.ssh/id_ed25519"
+PLEX_USER="plex"
+PASS=0; FAIL=0; WARN=0
+
+c_red()   { printf "\e[31m%s\e[0m" "$1"; }
+c_green() { printf "\e[32m%s\e[0m" "$1"; }
+c_yel()   { printf "\e[33m%s\e[0m" "$1"; }
+
+check() {
+    local label=$1; shift
+    printf "  %-48s " "$label"
+    if "$@" >/tmp/prt-status.$$ 2>&1; then
+        c_green "OK"; echo; ((PASS++))
+    else
+        c_red "FAIL"; echo
+        sed 's/^/    | /' /tmp/prt-status.$$
+        ((FAIL++))
+    fi
+    rm -f /tmp/prt-status.$$
+}
+
+warn_if() {
+    local label=$1; shift
+    printf "  %-48s " "$label"
+    if "$@" >/tmp/prt-status.$$ 2>&1; then
+        c_green "OK"; echo; ((PASS++))
+    else
+        c_yel "WARN"; echo
+        sed 's/^/    | /' /tmp/prt-status.$$
+        ((WARN++))
+    fi
+    rm -f /tmp/prt-status.$$
+}
+
+[[ -f $CONF ]] || { echo "config $CONF missing — has install-master.sh run?"; exit 1; }
+WORKER_HOST=$(awk -F'[= ]+' '/^host/{print $2; exit}' "$CONF")
+WORKER_USER=$(awk -F'[= ]+' '/^user/{print $2; exit}' "$CONF")
+PLEX_TRANSCODER=$(awk -F'= ' '/^plex_transcoder /{print $2; exit}' "$CONF")
+
+echo "Config:"
+echo "  worker host    : ${WORKER_HOST}"
+echo "  worker user    : ${WORKER_USER}"
+echo "  plex transcoder: ${PLEX_TRANSCODER}"
+echo
+
+SSH_BASE=(ssh
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o ControlPath=/run/prt/cm-%r@%h:%p
+    -o ControlMaster=auto
+    -o ControlPersist=600
+    -o ConnectTimeout=5
+    -i "$KEY"
+    "${WORKER_USER}@${WORKER_HOST}"
+)
+
+echo "Master:"
+check "wrapper installed (Plex Transcoder is shim)" \
+    bash -c 'head -1 "/usr/lib/plexmediaserver/Plex Transcoder" | grep -q "python"'
+check "backup of real Plex Transcoder kept" \
+    test -f "/usr/lib/plexmediaserver/Plex Transcoder.orig"
+check "/run/prt exists and is writable by ${PLEX_USER}" \
+    sudo -u "$PLEX_USER" bash -c 'test -d /run/prt && touch /run/prt/.probe && rm /run/prt/.probe'
+check "ssh keepalive service active" \
+    systemctl is-active --quiet prt-ssh-keepalive.service
+
+echo
+echo "Network / SSH:"
+check "tcp/22 to ${WORKER_HOST} reachable" \
+    bash -c "</dev/tcp/${WORKER_HOST}/22"
+check "ssh as ${PLEX_USER} to ${WORKER_USER}@${WORKER_HOST}" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'echo connected'
+check "ssh ControlMaster socket present" \
+    bash -c 'ls /run/prt/cm-* >/dev/null 2>&1'
+
+echo
+echo "Worker:"
+check "Plex Transcoder binary exists on worker" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" "test -x '${PLEX_TRANSCODER}'"
+check "/dev/dri exposed on worker (VAAPI)" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'test -e /dev/dri/renderD128 || test -e /dev/dri/card0'
+warn_if "NVIDIA GPU on worker (NVENC)" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'command -v nvidia-smi >/dev/null && nvidia-smi -L'
+check "${WORKER_USER} can read /dev/dri/render* on worker" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'for d in /dev/dri/renderD*; do [ -r "$d" ] && exit 0; done; exit 1'
+
+echo
+echo "Shared filesystem (run a probe-file test):"
+PROBE=/tmp/prt-probe-$$
+echo "prt probe $(date)" > "$PROBE" 2>/dev/null || true
+warn_if "/tmp visible on worker matches master (should NOT match)" \
+    sudo -u "$PLEX_USER" "${SSH_BASE[@]}" "test -f $PROBE && diff -q <(cat $PROBE) <(echo)"
+rm -f "$PROBE"
+echo "  (note: /tmp is not shared by design — actual NFS check is on the"
+echo "   real media + transcode-tmp paths. Run a manual diff there.)"
+
+echo
+echo "Summary: $(c_green "$PASS pass")  $(c_yel "$WARN warn")  $(c_red "$FAIL fail")"
+[[ $FAIL -eq 0 ]]

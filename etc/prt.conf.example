@@ -1,0 +1,33 @@
+; prt.conf — Plex Remote Transcoder wrapper config.
+; Install location: /etc/prt/prt.conf  (root:plex, mode 0640)
+
+[worker]
+; Hostname or IP of the GPU/transcode worker. Use a name that resolves
+; on the master (DNS, /etc/hosts, mDNS, …).
+host = worker.lan
+
+; UNIX user on the worker that runs the transcoder. Created by
+; install-worker.sh. MUST have read access to the GPU device(s).
+user = plex
+
+; SSH private key path on the master. Created by install-master.sh.
+ssh_key = /var/lib/plex/.ssh/id_ed25519
+
+; If the worker is unreachable (ssh exit 255) or ssh can't launch,
+; fall back to the locally-backed-up Plex Transcoder binary so playback
+; still works (just without GPU offload). Default off — when off,
+; transcoding fails loudly, which is preferable for debugging.
+fallback_local = true
+
+[paths]
+; The REAL Plex Transcoder binary path on the worker. Must match the
+; install on the master too (same Plex version on both nodes).
+plex_transcoder = /usr/lib/plexmediaserver/Plex Transcoder
+
+; Backup of the master's original Plex Transcoder binary, used for
+; fallback_local. Created by install-master.sh.
+plex_transcoder_backup = /usr/lib/plexmediaserver/Plex Transcoder.orig
+
+; Directory for SSH ControlMaster sockets. The plex user must own this
+; dir. install-master.sh creates a tmpfiles.d entry for it.
+ssh_control_dir = /run/prt

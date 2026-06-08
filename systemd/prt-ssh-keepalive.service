@@ -1,0 +1,50 @@
+[Unit]
+Description=Plex Remote Transcoder — persistent SSH ControlMaster to worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=plex
+Group=plex
+RuntimeDirectory=prt
+RuntimeDirectoryMode=0700
+
+; Read worker host/user out of the config (no shell expansion needed —
+; configparser-style file is also valid `source`-able if you stick to
+; simple K = V lines, which prt.conf does).
+EnvironmentFile=-/etc/prt/prt.conf.env
+
+; Hold a master SSH connection open. -N = no remote command. -M = master.
+; Reconnects are handled by Restart=always below.
+ExecStart=/usr/bin/ssh \
+    -N -M \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ControlPath=/run/prt/cm-%%r@%%h:%%p \
+    -o ControlPersist=0 \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -i /var/lib/plex/.ssh/id_ed25519 \
+    ${PRT_WORKER_USER}@${PRT_WORKER_HOST}
+
+Restart=always
+RestartSec=5
+
+; Hardening — service only needs network + the ssh key + the socket dir.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/prt /var/lib/plex/.ssh
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

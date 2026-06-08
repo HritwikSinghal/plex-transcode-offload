@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+prt-transcoder — Plex Remote Transcoder wrapper.
+
+Drops in for `/usr/lib/plexmediaserver/Plex Transcoder` on the master.
+Forwards every invocation to the worker over SSH (using a persistent
+ControlMaster connection), executes the real transcoder there with the
+same argv + env + cwd, and streams stdio + signals back.
+
+Design points:
+  * Zero-state. Each invocation is independent. Persistence comes from
+    SSH ControlMaster (managed by prt-ssh-keepalive.service) which keeps
+    the TCP+SSH handshake out of the hot path.
+  * Identical filesystem layout. Media + transcode temp dir must live at
+    the same path on master and worker (NFS makes this trivial). No
+    path translation is performed.
+  * Bounded env forwarding. We forward only env vars Plex actually uses,
+    plus a small allowlist. This keeps the remote command line under
+    ARG_MAX and avoids leaking unrelated state.
+  * Faithful signal forwarding. SIGTERM/SIGINT/SIGHUP/SIGQUIT propagate
+    to ssh, which (with -tt) relays them to the remote process group.
+"""
+
+from __future__ import annotations
+
+import configparser
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import syslog
+from pathlib import Path
+
+CONFIG_PATHS = (
+    Path("/etc/prt/prt.conf"),
+    Path.home() / ".config" / "prt" / "prt.conf",
+)
+
+# Env vars Plex Media Server passes to the transcoder that the remote
+# binary needs to behave identically. Prefix matches are checked first,
+# then exact names.
+ENV_PREFIX_ALLOWLIST = ("X_PLEX_", "PLEX_", "FFMPEG_", "XDG_", "LC_")
+ENV_NAME_ALLOWLIST = frozenset(
+    {
+        "LANG",
+        "LD_LIBRARY_PATH",
+        "TMPDIR",
+        "HOME",
+        "PATH",
+        "TERM",
+    }
+)
+
+
+def _log(msg: str) -> None:
+    syslog.syslog(syslog.LOG_INFO, f"prt-transcoder: {msg}")
+
+
+def _die(msg: str, code: int = 1) -> "None":
+    syslog.syslog(syslog.LOG_ERR, f"prt-transcoder: {msg}")
+    print(f"prt-transcoder: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _load_config() -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    found = [p for p in CONFIG_PATHS if p.is_file()]
+    if not found:
+        _die(
+            f"no config file found (looked at: {', '.join(str(p) for p in CONFIG_PATHS)})"
+        )
+    cfg.read(found)
+    for section in ("worker", "paths"):
+        if section not in cfg:
+            _die(f"config missing required [{section}] section")
+    return cfg
+
+
+def _should_forward(name: str) -> bool:
+    if name in ENV_NAME_ALLOWLIST:
+        return True
+    return any(name.startswith(p) for p in ENV_PREFIX_ALLOWLIST)
+
+
+def _build_remote_command(plex_transcoder_path: str) -> str:
+    """Build the shell-escaped command string to execute on the worker.
+
+    Form: `cd <cwd> && exec env -i K=V K=V ... -- <transcoder> <argv...>`
+    `env -i` wipes the remote login shell's env so only allow-listed vars
+    survive; `exec` replaces the shell so signals reach the binary directly.
+    """
+    env_assigns = " ".join(
+        f"{shlex.quote(k)}={shlex.quote(v)}"
+        for k, v in sorted(os.environ.items())
+        if _should_forward(k)
+    )
+    argv_quoted = " ".join(shlex.quote(a) for a in sys.argv[1:])
+    return (
+        f"cd {shlex.quote(os.getcwd())} && "
+        f"exec env -i {env_assigns} -- "
+        f"{shlex.quote(plex_transcoder_path)} {argv_quoted}"
+    )
+
+
+def _ssh_argv(cfg: configparser.ConfigParser, remote_command: str) -> list[str]:
+    worker = cfg["worker"]
+    host = worker["host"]
+    user = worker.get("user", "plex")
+    ssh_key = worker.get("ssh_key", "").strip()
+    control_dir = cfg["paths"].get("ssh_control_dir", "/run/prt").rstrip("/")
+
+    argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ControlPath={control_dir}/cm-%r@%h:%p",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPersist=600",
+        "-o",
+        "ServerAliveInterval=10",
+        "-o",
+        "ServerAliveCountMax=3",
+        # -tt forces a remote TTY so the remote process gets SIGHUP when
+        # ssh disconnects, ensuring no orphaned transcoders on master crash.
+        "-tt",
+    ]
+    if ssh_key:
+        argv += ["-i", ssh_key]
+    argv += [f"{user}@{host}", remote_command]
+    return argv
+
+
+def _fallback_local(cfg: configparser.ConfigParser) -> int:
+    """Optional local fallback when worker is unreachable."""
+    if not cfg["worker"].getboolean("fallback_local", fallback=False):
+        return -1
+    local_bin = cfg["paths"].get("plex_transcoder_backup")
+    if not local_bin or not Path(local_bin).is_file():
+        _log("fallback requested but no backup binary configured/present")
+        return -1
+    _log(f"falling back to local transcoder at {local_bin}")
+    return subprocess.call([local_bin, *sys.argv[1:]])
+
+
+def main() -> int:
+    syslog.openlog("prt-transcoder", syslog.LOG_PID, syslog.LOG_DAEMON)
+    cfg = _load_config()
+
+    plex_transcoder_path = cfg["paths"].get(
+        "plex_transcoder", "/usr/lib/plexmediaserver/Plex Transcoder"
+    )
+    remote_cmd = _build_remote_command(plex_transcoder_path)
+    ssh_cmd = _ssh_argv(cfg, remote_cmd)
+
+    _log(f"dispatch to {cfg['worker']['host']}: argv={len(sys.argv)-1} args")
+
+    try:
+        proc = subprocess.Popen(
+            ssh_cmd,
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            close_fds=True,
+        )
+    except FileNotFoundError:
+        _die("ssh not found; install openssh-client on the master")
+    except OSError as e:
+        rc = _fallback_local(cfg)
+        if rc >= 0:
+            return rc
+        _die(f"failed to launch ssh: {e}", code=69)  # EX_UNAVAILABLE
+
+    # Forward catchable signals to the ssh process (which propagates them
+    # to the remote process group thanks to -tt).
+    def _forward(signum: int, _frame) -> None:
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    for sig in (
+        signal.SIGTERM,
+        signal.SIGINT,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+        signal.SIGUSR1,
+        signal.SIGUSR2,
+    ):
+        signal.signal(sig, _forward)
+
+    try:
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        proc.send_signal(signal.SIGINT)
+        rc = proc.wait()
+
+    # ssh exit codes: 255 = ssh transport error. Optionally fall back.
+    if rc == 255:
+        _log("ssh transport error; considering local fallback")
+        local_rc = _fallback_local(cfg)
+        if local_rc >= 0:
+            return local_rc
+
+    _log(f"transcode finished rc={rc}")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
