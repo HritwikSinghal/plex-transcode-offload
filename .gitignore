@@ -221,3 +221,7 @@ __marimo__/
 
 # Machine-local Claude Code session state
 .claude/settings.local.json
+
+# Nix build symlinks
+result
+result-*
