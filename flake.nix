@@ -1,5 +1,5 @@
 {
-  description = "Plex remote-transcode SSH offload shim (prt) -- master-side flake";
+  description = "prt -- HTTP-based remote Plex transcoder (shim + masterd + workerd)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -19,7 +19,8 @@
     }:
     let
       # Hand-rolled multi-system via genAttrs so we avoid pulling in flake-utils
-      # as an input.
+      # as an input. The daemons only make sense on Linux, but the binary
+      # builds everywhere.
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -31,27 +32,69 @@
 
       # Eval the treefmt modules from ./treefmt.nix, per system.
       treefmtEval = forAllSystems (system: treefmt-nix.lib.evalModule (pkgsFor system) ./treefmt.nix);
+
+      prtFor =
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.buildGoModule {
+          pname = "prt";
+          version = "2.0.0";
+          src = self;
+
+          vendorHash = "sha256-qWQM+DlW/9/JlAv9M7QBUch3wSeOQFVgGxmkIm29yAM=";
+
+          subPackages = [ "cmd/prt" ];
+
+          env.CGO_ENABLED = "0";
+          ldflags = [
+            "-s"
+            "-w"
+          ];
+
+          # Role selection is by argv[0] basename; ship the canonical names.
+          # The master module additionally symlinks prt-shim in as
+          # "Plex Transcoder".
+          postInstall = ''
+            ln -s $out/bin/prt $out/bin/prt-shim
+            ln -s $out/bin/prt $out/bin/prt-masterd
+            ln -s $out/bin/prt $out/bin/prt-workerd
+          '';
+
+          meta = with nixpkgs.lib; {
+            description = "HTTP-based remote Plex transcoder (shim, masterd, workerd)";
+            homepage = "https://github.com/HritwikSinghal/plex-transcode-offload";
+            license = licenses.gpl3Only;
+            mainProgram = "prt";
+          };
+        };
     in
     {
       packages = forAllSystems (
         system:
         let
-          pkgs = pkgsFor system;
-          pkg = pkgs.callPackage ./package.nix { };
+          prt = prtFor system;
         in
         {
-          plex-transcode-offload = pkg;
-          default = pkg;
+          inherit prt;
+          # Compat alias for consumers of the v1 attribute name.
+          plex-transcode-offload = prt;
+          default = prt;
         }
       );
 
-      # Lets the deployment repo pull the package via overlay if it prefers that
-      # to a direct package reference.
       overlays.default = final: prev: {
-        plex-transcode-offload = final.callPackage ./package.nix { };
+        prt = prtFor final.stdenv.hostPlatform.system;
+        plex-transcode-offload = final.prt;
       };
 
-      # `nix fmt` -- formats nix, bash, python, and markdown (see treefmt.nix).
+      nixosModules = {
+        master = ./modules/master.nix;
+        worker = ./modules/worker.nix;
+      };
+
+      # `nix fmt` -- formats nix, go, and markdown (see treefmt.nix).
       formatter = forAllSystems (system: treefmtEval.${system}.config.build.wrapper);
 
       devShells = forAllSystems (
@@ -60,13 +103,12 @@
           pkgs = pkgsFor system;
         in
         {
-          # pytest is here for local convenience; the sandboxed check below
-          # uses stdlib unittest only, to keep its closure minimal.
           default = pkgs.mkShell {
             packages = [
-              pkgs.python3
-              pkgs.python3Packages.pytest
-              pkgs.shellcheck
+              pkgs.go
+              pkgs.gopls
+              pkgs.gotools
+              pkgs.nixfmt-rfc-style
             ];
           };
         }
@@ -78,32 +120,10 @@
           pkgs = pkgsFor system;
         in
         {
-          # Pure-stdlib unittest suite -- needs only python3. ${./.} copies the
-          # whole repo into the store so bin/ and tests/ are both present.
-          tests = pkgs.runCommand "prt-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-            cd ${./.} && python3 -m unittest discover -s tests -v && touch $out
-          '';
-          shellcheck = pkgs.runCommand "prt-shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-            cd ${./.} && shellcheck bin/prt-status install/install-master.sh install/install-worker.sh && touch $out
-          '';
+          # buildGoModule runs `go test ./...` in its checkPhase.
+          prt = self.packages.${system}.prt;
           # Fails `nix flake check` if any tracked file is not formatted.
           formatting = treefmtEval.${system}.config.build.check self;
-        }
-      );
-
-      apps = forAllSystems (
-        system:
-        let
-          pkg = (pkgsFor system).callPackage ./package.nix { };
-        in
-        {
-          # prt-status is the diagnostic entry point. prt-transcoder is NOT
-          # exposed as an app: it needs /etc/prt config and is only meaningful
-          # when Plex invokes it directly.
-          prt-status = {
-            type = "app";
-            program = "${pkg}/bin/prt-status";
-          };
         }
       );
     };
