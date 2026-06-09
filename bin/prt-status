@@ -43,6 +43,14 @@ warn_if() {
 WORKER_HOST=$(awk -F'[= ]+' '/^host/{print $2; exit}' "$CONF")
 WORKER_USER=$(awk -F'[= ]+' '/^user/{print $2; exit}' "$CONF")
 PLEX_TRANSCODER=$(awk -F'= ' '/^plex_transcoder /{print $2; exit}' "$CONF")
+# Master-side backup of the REAL transcoder; the live "Plex Transcoder" the
+# shim was installed over sits at the same path minus the .orig suffix. Read
+# both from the conf so the check is layout-agnostic: on Debian this resolves
+# to /usr/lib/plexmediaserver/..., on NixOS to the wrapped store path. Falls
+# back to the Debian default if an older conf omits the key.
+PLEX_TRANSCODER_BACKUP=$(awk -F'= ' '/^plex_transcoder_backup /{print $2; exit}' "$CONF")
+PLEX_TRANSCODER_BACKUP=${PLEX_TRANSCODER_BACKUP:-/usr/lib/plexmediaserver/Plex Transcoder.orig}
+PLEX_TRANSCODER_ACTIVE=${PLEX_TRANSCODER_BACKUP%.orig}
 
 echo "Config:"
 echo "  worker host    : ${WORKER_HOST}"
@@ -62,10 +70,17 @@ SSH_BASE=(ssh
 )
 
 echo "Master:"
+# The live transcoder is OUR shim, not the real binary. Works on every
+# packaging: the real Plex Transcoder is an ELF binary (no "#!"), whereas the
+# installed shim is a script (Debian: python wrapper) or a makeWrapper bash
+# wrapper (NixOS) -- both start with a shebang and reference prt-transcoder.
+# SC2016: the single quotes are intentional -- $0 is the active-transcoder
+# path passed as a positional arg, expanded inside the inner bash, not here.
+# shellcheck disable=SC2016
 check "wrapper installed (Plex Transcoder is shim)" \
-    bash -c 'head -1 "/usr/lib/plexmediaserver/Plex Transcoder" | grep -q "python"'
+    bash -c 'head -1 "$0" 2>/dev/null | grep -q "^#!" && grep -q "prt-transcoder" "$0"' "$PLEX_TRANSCODER_ACTIVE"
 check "backup of real Plex Transcoder kept" \
-    test -f "/usr/lib/plexmediaserver/Plex Transcoder.orig"
+    test -f "$PLEX_TRANSCODER_BACKUP"
 check "/run/prt exists and is writable by ${PLEX_USER}" \
     sudo -u "$PLEX_USER" bash -c 'test -d /run/prt && touch /run/prt/.probe && rm /run/prt/.probe'
 check "ssh keepalive service active" \
