@@ -16,13 +16,16 @@ PLEX_BIN="${PLEX_DIR}/Plex Transcoder"
 SSH_DIR="/var/lib/plex/.ssh"
 AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
-die() { echo "FATAL: $*" >&2; exit 1; }
+die() {
+    echo "FATAL: $*" >&2
+    exit 1
+}
 say() { echo "[install-worker] $*"; }
 
 [[ $EUID -eq 0 ]] || die "must run as root"
 
 # --- 1. ensure Plex is installed (we need the transcoder binaries) -------
-if ! [[ -x "$PLEX_BIN" ]]; then
+if ! [[ -x $PLEX_BIN ]]; then
     die "Plex Media Server not installed; install it first (same version as master) — the service does NOT need to run, but the binaries do need to be on disk."
 fi
 
@@ -56,6 +59,8 @@ done
 # Sanity check
 if [[ -e /dev/dri ]]; then
     say "/dev/dri present:"
+    # SC2012: human-readable display only; /dev/dri entries are stable names.
+    # shellcheck disable=SC2012
     ls -l /dev/dri | sed 's/^/  /'
 else
     say "WARN: /dev/dri missing — Intel/AMD VAAPI offload will not work"
@@ -75,7 +80,7 @@ if [[ $# -ge 1 ]]; then
     MASTER_PUBKEY="$*"
     if ! grep -qF -- "$MASTER_PUBKEY" "$AUTH_KEYS"; then
         say "appending master pubkey to ${AUTH_KEYS}"
-        echo "$MASTER_PUBKEY" >> "$AUTH_KEYS"
+        echo "$MASTER_PUBKEY" >>"$AUTH_KEYS"
     else
         say "master pubkey already present"
     fi

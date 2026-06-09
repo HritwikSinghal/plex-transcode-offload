@@ -88,6 +88,9 @@ check "/dev/dri exposed on worker (VAAPI)" \
     sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'test -e /dev/dri/renderD128 || test -e /dev/dri/card0'
 warn_if "NVIDIA GPU on worker (NVENC)" \
     sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'command -v nvidia-smi >/dev/null && nvidia-smi -L'
+# SC2016: the single quotes are intentional -- this loop must expand on the
+# REMOTE worker over ssh, not locally on the master.
+# shellcheck disable=SC2016
 check "${WORKER_USER} can read /dev/dri/render* on worker" \
     sudo -u "$PLEX_USER" "${SSH_BASE[@]}" 'for d in /dev/dri/renderD*; do [ -r "$d" ] && exit 0; done; exit 1'
 

@@ -23,7 +23,10 @@ PLEX_USER="plex"
 SSH_DIR="/var/lib/plex/.ssh"
 SSH_KEY="${SSH_DIR}/id_ed25519"
 
-die() { echo "FATAL: $*" >&2; exit 1; }
+die() {
+    echo "FATAL: $*" >&2
+    exit 1
+}
 say() { echo "[install-master] $*"; }
 
 [[ $EUID -eq 0 ]] || die "must run as root"

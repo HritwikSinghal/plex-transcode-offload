@@ -38,21 +38,20 @@ touching Plex's internals beyond swapping one binary.
 
 1. Plex on the master invokes what it thinks is `Plex Transcoder`. It is actually the
    `prt-transcoder` shim.
-2. The shim builds a remote command -- `cd <cwd> && exec env -i <allowlisted env> --
-   <real transcoder> <argv...>` -- and runs it on the worker over SSH, reusing a
+1. The shim builds a remote command -- `cd <cwd> && exec env -i <allowlisted env> -- <real transcoder> <argv...>` -- and runs it on the worker over SSH, reusing a
    `ControlMaster` socket kept warm by `prt-ssh-keepalive.service`.
-3. The worker runs the real transcoder on its GPU. Because media and the transcode temp
+1. The worker runs the real transcoder on its GPU. Because media and the transcode temp
    dir live at the **same absolute paths** on both nodes (via NFS), no path translation
    is needed -- the shim forwards argv and cwd verbatim.
-4. HLS segments land in the shared temp dir; the master reads them straight back.
-5. stdio and signals are forwarded faithfully end-to-end (see Design contracts).
+1. HLS segments land in the shared temp dir; the master reads them straight back.
+1. stdio and signals are forwarded faithfully end-to-end (see Design contracts).
 
 ## Repository layout
 
 | Path | What it is |
 |------|------------|
 | `bin/prt-transcoder` | Master-side Python shim that intercepts Plex transcoder calls and forwards them over SSH. |
-| `bin/prt-status` | Bash diagnostic that verifies the full master <-> worker pipeline. |
+| `bin/prt-status` | Bash diagnostic that verifies the full master \<-> worker pipeline. |
 | `etc/prt.conf.example` | Annotated config template (`[worker]` + `[paths]`). |
 | `systemd/prt-ssh-keepalive.service` | Keeps a persistent SSH `ControlMaster` connection to the worker up. |
 | `install/install-master.sh` | Idempotent installer for the Plex master node. |
@@ -61,11 +60,13 @@ touching Plex's internals beyond swapping one binary.
 ## Requirements
 
 **Master (Plex node)**
+
 - Plex Media Server installed.
 - Python 3 and `openssh-client`.
 - systemd.
 
 **Worker (GPU node)**
+
 - The **same Plex Media Server version** installed (only the transcoder binaries are
   needed -- the PMS service itself is stopped and disabled by the installer).
 - A usable GPU: Intel/AMD VAAPI (`/dev/dri/renderD128`) and/or NVIDIA NVENC
@@ -73,6 +74,7 @@ touching Plex's internals beyond swapping one binary.
 - The `plex` user with read access to the GPU devices.
 
 **Both nodes**
+
 - Shared NFS so that media files **and** Plex's transcode temp directory resolve at
   **identical absolute paths** on each node. This is the central design contract.
 
@@ -187,8 +189,7 @@ Runtime activity is logged to syslog under the `prt-transcoder` tag (`LOG_DAEMON
 This repository holds the **tool source only**. The Nix package/module, Terraform,
 Ansible roles, and sops wiring that deploy `prt` into a homelab live in a separate repo
 (`deploy-repo`: `nix/pkgs/plex-transcode-offload`,
-`nix/modules/plex-transcode-offload`, `tf/`, `ansible/roles/{plex_transcode_worker,
-nfs_server}`). Tool-source changes happen here; deployment/packaging changes happen
+`nix/modules/plex-transcode-offload`, `tf/`, `ansible/roles/{plex_transcode_worker, nfs_server}`). Tool-source changes happen here; deployment/packaging changes happen
 there.
 
 ## License
