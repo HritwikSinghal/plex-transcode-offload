@@ -62,7 +62,8 @@ func TestLoadShimUnknownField(t *testing.T) {
 	}
 }
 
-const masterdRequired = `"transcode_root":"/transcode","media_roots":["/mnt/media"],` +
+const masterdRequired = `"advertise_url":"http://10.0.50.138:32499",` +
+	`"transcode_root":"/transcode","media_roots":["/mnt/media"],` +
 	`"codecs_dir":"/codecs","workers":["http://w:32500"],"token_file":"/run/token"`
 
 func TestLoadMasterdDefaults(t *testing.T) {
@@ -85,6 +86,9 @@ func TestLoadMasterdDefaults(t *testing.T) {
 	if cfg.TranscodeRoot != "/transcode" || len(cfg.MediaRoots) != 1 || len(cfg.Workers) != 1 {
 		t.Errorf("required fields not loaded: %+v", cfg)
 	}
+	if cfg.AdvertiseURL != "http://10.0.50.138:32499" {
+		t.Errorf("AdvertiseURL = %q", cfg.AdvertiseURL)
+	}
 }
 
 func TestLoadMasterdMissingRequired(t *testing.T) {
@@ -92,10 +96,28 @@ func TestLoadMasterdMissingRequired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing required fields")
 	}
-	for _, want := range []string{"transcode_root", "media_roots", "codecs_dir", "workers", "token_file"} {
+	for _, want := range []string{"advertise_url", "transcode_root", "media_roots", "codecs_dir", "workers", "token_file"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}
+	}
+}
+
+func TestLoadMasterdBadAdvertiseURLScheme(t *testing.T) {
+	for _, bad := range []string{"10.0.50.138:32499", "ftp://m:1", "httpx://m:1"} {
+		body := `{"advertise_url":"` + bad + `","transcode_root":"/t","media_roots":["/m"],` +
+			`"codecs_dir":"/c","workers":["http://w:32500"],"token_file":"/tok"}`
+		if _, err := LoadMasterd(writeConfig(t, body)); err == nil {
+			t.Errorf("expected scheme error for advertise_url %q", bad)
+		}
+	}
+}
+
+func TestLoadMasterdHTTPSAdvertiseURL(t *testing.T) {
+	body := `{"advertise_url":"https://master.lan:32499","transcode_root":"/t",` +
+		`"media_roots":["/m"],"codecs_dir":"/c","workers":["http://w:32500"],"token_file":"/tok"}`
+	if _, err := LoadMasterd(writeConfig(t, body)); err != nil {
+		t.Errorf("https advertise_url rejected: %v", err)
 	}
 }
 
@@ -106,7 +128,8 @@ func TestLoadMasterdEmptyLists(t *testing.T) {
 	}
 }
 
-const workerdRequired = `"token_file":"/run/token","transcoder_path":"/nix/store/x/Plex Transcoder",` +
+const workerdRequired = `"master_url":"http://10.0.50.138:32499",` +
+	`"token_file":"/run/token","transcoder_path":"/nix/store/x/Plex Transcoder",` +
 	`"plex_dir":"/nix/store/x"`
 
 func TestLoadWorkerdDefaults(t *testing.T) {
@@ -138,6 +161,9 @@ func TestLoadWorkerdDefaults(t *testing.T) {
 	if cfg.PushQueueCap != 64 {
 		t.Errorf("PushQueueCap default = %d", cfg.PushQueueCap)
 	}
+	if cfg.MasterURL != "http://10.0.50.138:32499" {
+		t.Errorf("MasterURL = %q", cfg.MasterURL)
+	}
 }
 
 func TestLoadWorkerdDriversDirFollowsDataDir(t *testing.T) {
@@ -165,10 +191,28 @@ func TestLoadWorkerdMissingRequired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing required fields")
 	}
-	for _, want := range []string{"token_file", "transcoder_path", "plex_dir"} {
+	for _, want := range []string{"master_url", "token_file", "transcoder_path", "plex_dir"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}
+	}
+}
+
+func TestLoadWorkerdBadMasterURLScheme(t *testing.T) {
+	for _, bad := range []string{"10.0.50.138:32499", "ftp://m:1", "httpx://m:1"} {
+		body := `{"master_url":"` + bad + `","token_file":"/tok",` +
+			`"transcoder_path":"/nix/store/x/Plex Transcoder","plex_dir":"/nix/store/x"}`
+		if _, err := LoadWorkerd(writeConfig(t, body)); err == nil {
+			t.Errorf("expected scheme error for master_url %q", bad)
+		}
+	}
+}
+
+func TestLoadWorkerdHTTPSMasterURL(t *testing.T) {
+	body := `{"master_url":"https://master.lan:32499","token_file":"/tok",` +
+		`"transcoder_path":"/nix/store/x/Plex Transcoder","plex_dir":"/nix/store/x"}`
+	if _, err := LoadWorkerd(writeConfig(t, body)); err != nil {
+		t.Errorf("https master_url rejected: %v", err)
 	}
 }
 

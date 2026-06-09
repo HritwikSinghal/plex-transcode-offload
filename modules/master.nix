@@ -109,8 +109,10 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
-        ReadWritePaths = cfg.readWritePaths;
-        ReadOnlyPaths = cfg.readOnlyPaths;
+        # Quote each entry: systemd splits unquoted unit-file path lists on
+        # whitespace, which breaks paths like ".../Plex Media Server/Codecs".
+        ReadWritePaths = map (p: ''"${p}"'') cfg.readWritePaths;
+        ReadOnlyPaths = map (p: ''"${p}"'') cfg.readOnlyPaths;
       };
     };
   };

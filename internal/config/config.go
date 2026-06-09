@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Environment variables of the shim (injected into the PMS unit by the
@@ -36,6 +37,7 @@ type ShimConfig struct {
 type MasterdConfig struct {
 	Listen           string   `json:"listen"`             // default ":32499"
 	PMSURL           string   `json:"pms_url"`            // default "http://127.0.0.1:32400"
+	AdvertiseURL     string   `json:"advertise_url"`      // required; masterd's LAN-reachable base URL, e.g. "http://10.0.50.138:32499"
 	TranscodeRoot    string   `json:"transcode_root"`     // required; session target dirs must be under it
 	MediaRoots       []string `json:"media_roots"`        // required; allowlisted RO roots of the media server
 	CodecsDir        string   `json:"codecs_dir"`         // required; master's Codecs dir
@@ -49,6 +51,7 @@ type MasterdConfig struct {
 type WorkerdConfig struct {
 	Listen         string `json:"listen"`          // default ":32500"
 	ProxyListen    string `json:"proxy_listen"`    // default "127.0.0.1:32401"
+	MasterURL      string `json:"master_url"`      // required; masterd base URL for codec-cache sync / provisioning
 	DataDir        string `json:"data_dir"`        // default "/var/lib/prt"
 	EAERoot        string `json:"eae_root"`        // default "/run/prt-eae/shared"
 	MaxJobs        int    `json:"max_jobs"`        // default 3
@@ -103,6 +106,11 @@ func LoadMasterd(path string) (MasterdConfig, error) {
 	}
 
 	var errs []error
+	if cfg.AdvertiseURL == "" {
+		errs = append(errs, errors.New("advertise_url is required"))
+	} else if !isHTTPURL(cfg.AdvertiseURL) {
+		errs = append(errs, errors.New("advertise_url must start with http:// or https://"))
+	}
 	if cfg.TranscodeRoot == "" {
 		errs = append(errs, errors.New("transcode_root is required"))
 	}
@@ -162,6 +170,11 @@ func LoadWorkerd(path string) (WorkerdConfig, error) {
 	}
 
 	var errs []error
+	if cfg.MasterURL == "" {
+		errs = append(errs, errors.New("master_url is required"))
+	} else if !isHTTPURL(cfg.MasterURL) {
+		errs = append(errs, errors.New("master_url must start with http:// or https://"))
+	}
 	if cfg.TokenFile == "" {
 		errs = append(errs, errors.New("token_file is required"))
 	}
@@ -184,6 +197,11 @@ func LoadWorkerd(path string) (WorkerdConfig, error) {
 		return WorkerdConfig{}, err
 	}
 	return cfg, nil
+}
+
+// isHTTPURL reports whether s carries an explicit http or https scheme.
+func isHTTPURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 // loadJSON decodes one JSON object from path into v, rejecting unknown

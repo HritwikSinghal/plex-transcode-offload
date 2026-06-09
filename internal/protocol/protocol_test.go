@@ -60,6 +60,84 @@ func TestJobRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRegisterSessionResponseRoundTrip(t *testing.T) {
+	resp := RegisterSessionResponse{
+		PushToken:    "push-tok",
+		AdvertiseURL: "http://10.0.50.138:32499",
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got RegisterSessionResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(resp, got) {
+		t.Errorf("round trip mismatch:\n in: %+v\nout: %+v", resp, got)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatalf("unmarshal map: %v", err)
+	}
+	for _, key := range []string{"push_token", "advertise_url"} {
+		if _, ok := asMap[key]; !ok {
+			t.Errorf("wire key %q missing in %s", key, raw)
+		}
+	}
+}
+
+func TestWorkersResponseRoundTrip(t *testing.T) {
+	resp := WorkersResponse{
+		Workers: []WorkerStatus{
+			{
+				URL:     "http://10.0.50.52:32500",
+				Healthy: true,
+				Health: Health{
+					Status:      HealthOK,
+					PlexBuild:   "1.43.0.10000-abcdef123",
+					ActiveJobs:  1,
+					MaxJobs:     3,
+					VaapiOK:     true,
+					CodecsReady: map[string]bool{"1.43.0.10000-abcdef123": true},
+				},
+			},
+			{URL: "http://10.0.50.53:32500", Healthy: false},
+		},
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got WorkersResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(resp, got) {
+		t.Errorf("round trip mismatch:\n in: %+v\nout: %+v", resp, got)
+	}
+
+	// Wire field names are the contract; spot-check the json tags.
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatalf("unmarshal map: %v", err)
+	}
+	workers, ok := asMap["workers"].([]any)
+	if !ok || len(workers) != 2 {
+		t.Fatalf("workers key missing or wrong shape in %s", raw)
+	}
+	first, ok := workers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("workers[0] not an object")
+	}
+	for _, key := range []string{"url", "healthy", "health"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("worker wire key %q missing in %s", key, raw)
+		}
+	}
+}
+
 func TestEventRoundTrip(t *testing.T) {
 	code := 75
 	cases := []struct {

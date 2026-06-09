@@ -176,9 +176,28 @@ type RegisterSessionRequest struct {
 	TargetDir string `json:"target_dir"`
 }
 
-// RegisterSessionResponse returns the per-session segment-push token.
+// RegisterSessionResponse returns the per-session segment-push token plus
+// masterd's advertised base URL.
 type RegisterSessionResponse struct {
 	PushToken string `json:"push_token"`
+	// AdvertiseURL is masterd's LAN-reachable base URL (e.g.
+	// "http://10.0.50.138:32499"). The shim uses it to build the session
+	// push URL, signed media URLs and the relay base sent to the worker.
+	AdvertiseURL string `json:"advertise_url"`
+}
+
+// WorkerStatus is one worker entry of a WorkersResponse: masterd's cached
+// view of a single workerd.
+type WorkerStatus struct {
+	URL     string `json:"url"`
+	Healthy bool   `json:"healthy"`
+	Health  Health `json:"health"`
+}
+
+// WorkersResponse is the GET /v1/workers response of prt-masterd, consumed
+// by the shim to pick a worker.
+type WorkersResponse struct {
+	Workers []WorkerStatus `json:"workers"`
 }
 
 // ErrorBody is the JSON body of every non-2xx response.

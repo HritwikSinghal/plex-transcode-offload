@@ -130,7 +130,9 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
-        ReadWritePaths = [
+        # Quote each entry: systemd splits unquoted unit-file path lists on
+        # whitespace, which breaks paths containing spaces.
+        ReadWritePaths = map (p: ''"${p}"'') [
           dataDir
           "/run/prt-eae"
         ];
