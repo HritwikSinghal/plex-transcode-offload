@@ -14,9 +14,9 @@
 # under ./bin, ./etc, ./systemd (no vendored copy). The tool is pure stdlib
 # python3 + bash with no build step.
 #
-# `prt-transcoder` replaces the master's "Plex Transcoder" binary (see
-# deploy-repo modules/plex-transcode-offload, which renames the real one
-# to .orig and drops this in via plexRaw.overrideAttrs). It forwards each
+# `prt-transcoder` replaces the master's "Plex Transcoder" binary (the
+# deployment repo's NixOS module renames the real one to .orig and drops this
+# in via plexRaw.overrideAttrs). It forwards each
 # transcode over SSH to the worker, so it MUST be able to find `ssh` -- and
 # because Plex runs the transcoder inside its buildFHSEnv sandbox, the python3
 # interpreter and ssh must be referenced by absolute store path. The
@@ -30,7 +30,7 @@ stdenvNoCC.mkDerivation {
   version = "0-unstable-2026-06-09";
 
   # Scope the source to exactly the dirs we install so unrelated files
-  # (claude/, tests/, README.md, .pytest_cache) do not trigger rebuilds.
+  # (tests/, README.md, .pytest_cache) do not trigger rebuilds.
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
@@ -93,9 +93,9 @@ stdenvNoCC.mkDerivation {
       segments to an NFS-shared temp dir. Falls back to the local (backed-up)
       transcoder when the worker is unreachable.
     '';
-    homepage = "https://github.com/HritwikSinghal";
-    license = lib.licenses.mit;
-    maintainers = with lib.maintainers; [ oakenshield ];
+    homepage = "https://github.com/HritwikSinghal/plex-transcode-offload";
+    license = lib.licenses.gpl3Only;
+    maintainers = [ ];
     platforms = [ "x86_64-linux" ];
     mainProgram = "prt-transcoder";
   };

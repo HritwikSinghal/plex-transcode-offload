@@ -33,18 +33,6 @@ them. fallback_local=true runs the master's own transcoder if the worker is unre
 
 ## Integration boundary
 
-The nix package/module, Terraform, Ansible roles, and sops wiring that DEPLOY this tool into
-the homelab live in a SEPARATE repo: ~/Projects/deploy-repo
-(nix/pkgs/plex-transcode-offload, nix/modules/plex-transcode-offload, tf/, ansible/roles/{
-plex_transcode_worker,nfs_server}). The imported claude/ docs reference those oakenshields
-paths -- that cross-repo boundary is EXPECTED, not stale. Tool-source changes (e.g. Phase B
-hardening: R1/R2/S2/R7) happen HERE; deployment/packaging changes happen in deploy-repo.
-
-## Long-running project
-
-- Read claude/progress.md and claude/tasks.md at session start (silently) to catch up.
-- Update them after each task: mark [x] on completion, append new action items, log progress
-  and blockers in progress.md.
-- claude/plex-offload-handoff.md is the authoritative detailed status; claude/
-  plex-offload-phase-a-plan.md is the approved Phase A plan; the two transcode-temp-storage
-  docs hold the settled S1 storage research.
+This repo is the tool source only. The Nix package/module, Terraform, Ansible roles, and
+secrets wiring that DEPLOY this tool into a homelab live in a SEPARATE private deployment
+repository. Tool-source changes happen HERE; deployment/packaging changes happen there.

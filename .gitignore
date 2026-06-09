@@ -225,3 +225,6 @@ __marimo__/
 # Nix build symlinks
 result
 result-*
+
+# Local project working docs (kept out of the public repo)
+claude/

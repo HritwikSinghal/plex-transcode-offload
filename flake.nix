@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    # `nix fmt` + the formatting check (mirrors the deploy-repo flake).
+    # `nix fmt` + the formatting check.
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -18,8 +18,8 @@
       treefmt-nix,
     }:
     let
-      # Hand-rolled multi-system via genAttrs (matches the local convention in
-      # example-repo-a / example-repo-b) so we avoid pulling in flake-utils as an input.
+      # Hand-rolled multi-system via genAttrs so we avoid pulling in flake-utils
+      # as an input.
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -45,7 +45,7 @@
         }
       );
 
-      # Lets deploy-repo pull the package via overlay if it prefers that
+      # Lets the deployment repo pull the package via overlay if it prefers that
       # to a direct package reference.
       overlays.default = final: prev: {
         plex-transcode-offload = final.callPackage ./package.nix { };

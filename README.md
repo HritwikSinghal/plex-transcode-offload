@@ -187,9 +187,8 @@ Runtime activity is logged to syslog under the `prt-transcoder` tag (`LOG_DAEMON
 ## Deployment / packaging
 
 This repository holds the **tool source only**. The Nix package/module, Terraform,
-Ansible roles, and sops wiring that deploy `prt` into a homelab live in a separate repo
-(`deploy-repo`: `nix/pkgs/plex-transcode-offload`,
-`nix/modules/plex-transcode-offload`, `tf/`, `ansible/roles/{plex_transcode_worker, nfs_server}`). Tool-source changes happen here; deployment/packaging changes happen
+Ansible roles, and secrets wiring that deploy `prt` into a homelab live in a separate
+private repository. Tool-source changes happen here; deployment/packaging changes happen
 there.
 
 ## License
