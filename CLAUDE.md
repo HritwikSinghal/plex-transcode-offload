@@ -2,37 +2,60 @@
 
 ## What this repo is
 
-The `plex-transcode-offload` (prt) tool. It replaces Plex Media Server's "Plex Transcoder"
-binary with a shim that forwards each transcode job over SSH to a remote GPU worker; the
-worker runs the real transcoder against its iGPU and writes HLS segments to a temp dir shared
-back to the master over NFS. The master's local GPU is the fallback. Pure-stdlib Python3 +
-Bash -- there is NO build step.
+The `prt` tool: one static Go binary that offloads Plex Media Server transcoding to a
+remote worker over plain HTTP. Three roles in one binary, selected by argv[0] basename
+("Plex Transcoder"/prt-shim, prt-masterd, prt-workerd) or subcommand (`prt shim|masterd|workerd|version`):
+
+- shim -- replaces PMS's "Plex Transcoder" on the master; dispatches each job to a worker
+  and execs the local `Plex Transcoder.orig` fallback on any pre-segment failure.
+- masterd (:32499) -- master daemon: segment receiver (write tmp + rename into the PMS
+  session dir), media/codecs file server (HMAC-signed URLs), PMS callback relay, worker
+  health cache.
+- workerd (:32500) -- worker daemon: runs the real transcoder on the local iGPU, pushes
+  segments back over HTTP, gates seglist announces until every referenced chunk is
+  ACKed (THE correctness invariant), supervises EasyAudioEncoder.
+
+v1 (Python shim, SSH dispatch, NFS shared paths) is preserved at git tag `v1`; v2 is a
+clean-slate rewrite, not a port.
 
 ## Layout
 
-- bin/prt-transcoder -- the master-side Python shim (intercepts Plex transcoder calls, forwards
-  over SSH with faithful stdio + signal handling; zero-state, persistence via SSH ControlMaster).
-- bin/prt-status -- Bash diagnostic that verifies the master\<->worker pipeline.
-- etc/prt.conf.example -- INI config template ([worker] host/user/ssh_key/fallback_local,
-  [paths] plex_transcoder/plex_transcoder_backup/ssh_control_dir).
-- systemd/prt-ssh-keepalive.service -- keeps a persistent SSH ControlMaster connection up.
-- install/install-master.sh, install/install-worker.sh -- idempotent node installers.
+- `cmd/prt/main.go` -- role dispatch (`resolveRole` is the pure, tested core).
+- `internal/protocol` -- wire types + constants. THE shared contract; never redefine
+  these in role packages, and treat field/JSON-tag changes as breaking.
+- `internal/config` -- ShimConfig/MasterdConfig/WorkerdConfig JSON schemas (snake_case)
+  and validating loaders (defaults applied, required fields enforced, unknown keys
+  rejected). Shim config comes from `$PRT_CONF`; its token from `$PRT_TOKEN_FILE`.
+- `internal/authtok` -- bearer middleware (constant-time), MintToken, LoadToken,
+  SignURL/VerifySignedQuery (HMAC-SHA256 over canonical path+query | expiry).
+- `internal/ndjson` -- event stream Writer/Reader: per-event flush, 5s heartbeats,
+  Reader.WatchLiveness for the 10s peer-lost rule.
+- `internal/{shim,masterd,workerd}` -- role implementations (`Run(args []string) int`).
+- `modules/master.nix`, `modules/worker.nix` -- generic NixOS modules
+  (`services.prt-masterd` / `services.prt-workerd`); site specifics live in the
+  consuming homelab repo, not here.
 
-## How it works (1-liner)
+## Key invariants (do not break)
 
-master Plex -> prt-transcoder shim -> ssh (ControlMaster) -> worker runs real transcoder on
-its iGPU -> HLS segments land in an NFS-shared temp dir at an identical path -> master serves
-them. fallback_local=true runs the master's own transcoder if the worker is unreachable.
+- Chunk-before-announce: a seglist/manifest POST may only reach PMS after every chunk
+  it references is PUT-ACKed by masterd. Progress POSTs pass through immediately.
+- Job liveness is connection-based, never signal-based: PMS SIGKILLs the shim; the
+  NDJSON events stream is the lifeline (5s heartbeats, 10s timeout). Worker lost
+  mid-job => shim exits 75 (protocol.ExitWorkerLost) and PMS restarts the session.
+- Every pre-first-segment failure execs the local `Plex Transcoder.orig` with the
+  original argv -- playback never breaks.
+- Single third-party dep: fsnotify. Everything else stdlib (+httptest in tests).
 
-## Design contracts (do not break)
+## Commands
 
-- Identical filesystem layout: media + transcode-temp at the SAME absolute path on both nodes
-  (NFS). The shim forwards paths verbatim.
-- Bounded env forwarding: only Plex-relevant env vars are forwarded (avoids ARG_MAX overflow).
-- Faithful signal forwarding: SIGTERM/SIGINT/SIGHUP/SIGQUIT propagate to the remote job.
+- `go build ./... && go vet ./... && go test ./...` -- must stay green.
+- `nix build .#prt` -- static binary + role symlinks; tests run in checkPhase.
+- `nix flake check` -- adds the treefmt formatting check; `nix fmt` to fix.
+- vendorHash debugging: set `lib.fakeHash`-style placeholder, build, copy the real
+  hash from the error.
 
 ## Integration boundary
 
-This repo is the tool source only. The Nix package/module, Terraform, Ansible roles, and
-secrets wiring that DEPLOY this tool into a homelab live in a SEPARATE private deployment
-repository. Tool-source changes happen HERE; deployment/packaging changes happen there.
+This repo is the tool source only. Deployment (Colmena targets, PMS wrappedPlexRaw
+swap, sops token, firewall) lives in the separate private homelab repo, which imports
+this flake's `packages` and `nixosModules`.
