@@ -217,7 +217,13 @@ func (j *job) prepare() (argv, env []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	driverDir, _ := j.d.driverDriDir(j.req.PlexBuild)
+	driverDir, haveDriver := j.d.driverDriDir(j.req.PlexBuild)
+	if !haveDriver {
+		j.d.logf("job %s: no iHD driver bundle for build %s; jobs run software", j.id, j.req.PlexBuild)
+	}
+	if driverDir != "" {
+		j.rewriteFilterComplex(argv)
+	}
 	env = buildEnv(
 		j.req.Env,
 		j.dir,
@@ -227,6 +233,25 @@ func (j *job) prepare() (argv, env []string, err error) {
 		driverDir,
 	)
 	return argv, env, nil
+}
+
+// rewriteFilterComplex swaps a dispatched software tonemap filtergraph for
+// its VAAPI-native form (see tonemap.go) when the worker has a usable iHD
+// driver. The master composed the graph for ITS (AMD) GPU, so 4K HDR
+// sessions otherwise burn one worker CPU core at ~0.2x realtime. In-place
+// on the substituted argv; a non-matching graph is left untouched.
+func (j *job) rewriteFilterComplex(argv []string) {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] != "-filter_complex" {
+			continue
+		}
+		if rewritten, changed := rewriteTonemapChain(argv[i+1]); changed {
+			j.d.logf("job %s: rewrote software tonemap chain to vaapi (%d -> %d bytes)",
+				j.id, len(argv[i+1]), len(rewritten))
+			argv[i+1] = rewritten
+		}
+		return // PMS emits at most one -filter_complex
+	}
 }
 
 // spool downloads one small aux file (subtitle, font) into the job spool
