@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -261,6 +263,11 @@ func (s *server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	tmp := final + tmpSuffix
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.putAfterDirRemoved(w, id, rel)
+			return
+		}
+		s.log.Printf("session %s: PUT %s open failed: %v -> 500", id, rel, err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "open: "+err.Error())
 		return
 	}
@@ -272,14 +279,31 @@ func (s *server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = closeErr
 		}
+		s.log.Printf("session %s: PUT %s write failed: %v -> 500", id, rel, err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "write: "+err.Error())
 		return
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)
+		if errors.Is(err, fs.ErrNotExist) { // dir vanished between open and rename
+			s.putAfterDirRemoved(w, id, rel)
+			return
+		}
+		s.log.Printf("session %s: PUT %s rename failed: %v -> 500", id, rel, err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "rename: "+err.Error())
 		return
 	}
 	s.sessions.touch(id)
 	w.WriteHeader(http.StatusOK)
+}
+
+// putAfterDirRemoved answers a PUT whose session dir PMS already deleted
+// (abandoned-session cleanup race). This is an expected race, not a server
+// error: 410 tells the worker to stop retrying, and tombstoning the session
+// makes any further PUTs short-circuit at lookup instead of re-probing the
+// filesystem (and re-logging).
+func (s *server) putAfterDirRemoved(w http.ResponseWriter, id, rel string) {
+	s.log.Printf("session %s: PUT %s after session dir removed -> 410", id, rel)
+	s.sessions.tombstone(id)
+	writeError(w, http.StatusGone, "GONE", "session dir removed")
 }

@@ -136,6 +136,36 @@ func TestDeleteSessionTombstonesAfterDrain(t *testing.T) {
 	}
 }
 
+func TestPutAfterSessionDirRemoved(t *testing.T) {
+	s, ts := newTestServer(t)
+	target := filepath.Join(s.transcodeRoot, "sess-gone")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := register(t, ts, "jg", target)
+
+	// PMS abandoned the session and deleted its dir; the session is still
+	// live in the registry. A late PUT must be 410 (expected race), not 500.
+	if err := os.RemoveAll(target); err != nil {
+		t.Fatal(err)
+	}
+	put := ts.URL + "/v1/sessions/jg/files/media-00009.ts"
+	if resp := doReq(t, http.MethodPut, put, out.PushToken, []byte("x")); resp.StatusCode != http.StatusGone {
+		t.Fatalf("PUT after dir removed: status %d, want 410", resp.StatusCode)
+	}
+	// The ENOENT path tombstones the session: the next PUT 410s at lookup.
+	if state, _ := s.sessions.lookup("jg"); state != sessionGone {
+		t.Fatalf("session state after ENOENT PUT: %v, want sessionGone", state)
+	}
+	if resp := doReq(t, http.MethodPut, put, out.PushToken, []byte("x")); resp.StatusCode != http.StatusGone {
+		t.Fatalf("second PUT after tombstone: status %d, want 410", resp.StatusCode)
+	}
+	// The dir was never resurrected.
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("session dir was recreated by a late PUT")
+	}
+}
+
 func TestTraversalRejected(t *testing.T) {
 	s, ts := newTestServer(t)
 
