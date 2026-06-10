@@ -17,9 +17,11 @@ func TestSubstituteArgv(t *testing.T) {
 		"-filter_complex", "[0:2]subtitles=f={{MEDIA:1}}",
 		"-progressurl", "{{PMS}}/video/:/transcode/session/abc/progress",
 		"-segment_list", "{{PMS}}/video/:/transcode/session/abc/u1/seglist",
+		"-loglevel_plex", "{{PLEXDIR}}/Resources/log-config.xml",
 		"{{OUTDIR}}/media-%05d.ts",
 	}
-	got, err := substituteArgv(in, "/var/lib/prt/jobs/j1/out", "http://127.0.0.1:32401/relay/j1", media)
+	got, err := substituteArgv(in, "/var/lib/prt/jobs/j1/out", "http://127.0.0.1:32401/relay/j1",
+		"/nix/store/yy-plexmediaserver-1.43.0.10166-deadbeef/lib/plexmediaserver", media)
 	if err != nil {
 		t.Fatalf("substituteArgv: %v", err)
 	}
@@ -28,6 +30,7 @@ func TestSubstituteArgv(t *testing.T) {
 		"-filter_complex", "[0:2]subtitles=f=/var/lib/prt/jobs/j1/spool/m1.srt",
 		"-progressurl", "http://127.0.0.1:32401/relay/j1/video/:/transcode/session/abc/progress",
 		"-segment_list", "http://127.0.0.1:32401/relay/j1/video/:/transcode/session/abc/u1/seglist",
+		"-loglevel_plex", "/nix/store/yy-plexmediaserver-1.43.0.10166-deadbeef/lib/plexmediaserver/Resources/log-config.xml",
 		"/var/lib/prt/jobs/j1/out/media-%05d.ts",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -36,7 +39,7 @@ func TestSubstituteArgv(t *testing.T) {
 }
 
 func TestSubstituteArgvUnresolvedMedia(t *testing.T) {
-	_, err := substituteArgv([]string{"-i", "{{MEDIA:3}}"}, "/out", "http://p", nil)
+	_, err := substituteArgv([]string{"-i", "{{MEDIA:3}}"}, "/out", "http://p", "/plex", nil)
 	if err == nil {
 		t.Fatal("expected error for unresolved media placeholder")
 	}

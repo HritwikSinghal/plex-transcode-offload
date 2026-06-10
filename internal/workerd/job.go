@@ -202,7 +202,7 @@ func (j *job) prepare() (argv, env []string, err error) {
 	}
 	// argv[0] is the master-side transcoder path; the worker substitutes
 	// its own cfg.transcoder_path at spawn.
-	argv, err = substituteArgv(j.req.Argv[1:], j.outDir, j.d.proxyBase(j.id), values)
+	argv, err = substituteArgv(j.req.Argv[1:], j.outDir, j.d.proxyBase(j.id), j.d.cfg.PlexDir, values)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -8,6 +8,14 @@ import (
 	"github.com/HritwikSinghal/plex-transcode-offload/internal/protocol"
 )
 
+// placeholderPlexDir mirrors the shim's PlaceholderPlexDir constant
+// (internal/shim/rewrite.go): argv paths under the MASTER's plex install dir
+// (wrappedPlexRaw -- a different store path than the worker's plain plexRaw,
+// even at byte-identical build) arrive as "{{PLEXDIR}}/..." and are rewritten
+// onto the worker's own cfg.plex_dir. Defined locally because the workerd
+// branch predates the shim's rewrite.go landing; the value is wire-frozen.
+const placeholderPlexDir = "{{PLEXDIR}}"
+
 // substituteArgv resolves the protocol placeholders of a dispatched argv
 // (the program token, argv[0], is NOT included -- the worker always runs its
 // own cfg.transcoder_path):
@@ -16,6 +24,8 @@ import (
 //   - {{PMS}}     -> the gating-proxy relay base for this job
 //     (http://127.0.0.1:32401/relay/<id>), so every PMS callback URL
 //     (progress, seglist, manifest) is interposed;
+//   - {{PLEXDIR}} -> the worker's plex_dir (master plex-install-dir paths:
+//     Resources, EAE binary references, ...);
 //   - {{MEDIA:n}} -> media[placeholder]: the signed masterd stream URL
 //     (ffmpeg fetches it directly; no extra protocol args are injected) or
 //     the spooled local path. Replacement is substring-wise because spool
@@ -23,12 +33,13 @@ import (
 //
 // A media placeholder left unresolved is an error: spawning would hand the
 // transcoder a literal "{{MEDIA:n}}" path.
-func substituteArgv(argv []string, outDir, proxyBase string, media map[string]string) ([]string, error) {
+func substituteArgv(argv []string, outDir, proxyBase, plexDir string, media map[string]string) ([]string, error) {
 	out := make([]string, len(argv))
 	for i, tok := range argv {
 		orig := tok
 		tok = strings.ReplaceAll(tok, protocol.PlaceholderOutDir, outDir)
 		tok = strings.ReplaceAll(tok, protocol.PlaceholderPMS, proxyBase)
+		tok = strings.ReplaceAll(tok, placeholderPlexDir, plexDir)
 		for ph, val := range media {
 			tok = strings.ReplaceAll(tok, ph, val)
 		}
