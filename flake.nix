@@ -43,7 +43,7 @@
           version = "2.0.0";
           src = self;
 
-          vendorHash = "sha256-qWQM+DlW/9/JlAv9M7QBUch3wSeOQFVgGxmkIm29yAM=";
+          vendorHash = "sha256-FLxr4UQtwBsjts3NN5uE3x/hpB4lizLjd6SnJuk8VPk=";
 
           subPackages = [ "cmd/prt" ];
 
