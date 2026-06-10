@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/HritwikSinghal/plex-transcode-offload/internal/authtok"
 	"github.com/HritwikSinghal/plex-transcode-offload/internal/protocol"
@@ -76,15 +77,55 @@ func safeName(name string) bool {
 		!strings.ContainsAny(name, "/\\\x00")
 }
 
+// resolveDir maps a worker-reported build string onto the master's actual
+// Codecs subdir. Plex names these dirs after the TRANSCODER's internal
+// codec version ("c75335c-<hash>-linux-x86_64"), which is not derivable
+// from the PMS build string the shim pins -- so an exact match is tried
+// first and the lookup then falls back over the non-EAE subdirs: with
+// several candidates (old dirs survive Plex upgrades) the most recently
+// modified wins, which is the one the running PMS maintains.
+func (c *codecCache) resolveDir(build string) (string, error) {
+	exact := filepath.Join(c.dir, build)
+	if st, err := os.Stat(exact); err == nil && st.IsDir() {
+		return exact, nil
+	}
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return "", err
+	}
+	var best string
+	var bestMod time.Time
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "EasyAudioEncoder") {
+			continue
+		}
+		full := filepath.Join(c.dir, e.Name())
+		st, err := os.Stat(full) // follows symlinks (nix-store friendliness)
+		if err != nil || !st.IsDir() {
+			continue
+		}
+		if best == "" || st.ModTime().After(bestMod) {
+			best, bestMod = full, st.ModTime()
+		}
+	}
+	if best == "" {
+		return "", fs.ErrNotExist
+	}
+	return best, nil
+}
+
 // manifest returns the (possibly cached) manifest for build. fs.ErrNotExist
-// is returned when the build dir is absent.
+// is returned when no codec dir resolves for it.
 func (c *codecCache) manifest(build string) (*protocol.CodecsManifest, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if m, ok := c.manifests[build]; ok {
 		return m, nil
 	}
-	dir := filepath.Join(c.dir, build)
+	dir, err := c.resolveDir(build)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -150,7 +191,12 @@ func (s *server) handleCodecsFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid build or file name")
 		return
 	}
-	f, err := os.Open(filepath.Join(s.codecs.dir, build, name))
+	dir, err := s.codecs.resolveDir(build)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "unknown build")
+		return
+	}
+	f, err := os.Open(filepath.Join(dir, name))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such codec file")
 		return

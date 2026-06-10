@@ -178,6 +178,18 @@ in
         export LD_LIBRARY_PATH="${cfg.driverFetch.plexPackage}/lib"
         export HOME="$support"
 
+        # plexRaw replaces its template library DB with a symlink to /db,
+        # which only exists inside the FHS wrapper's sandbox (seeded from
+        # plexRaw.basedb). Running the raw PMS without that wrapper, both
+        # databases it bootstraps from the template must be seeded here or
+        # PMS dies on "no such table: schema_migrations".
+        dbdir="$pms_dir/Plug-in Support/Databases"
+        mkdir -p "$dbdir"
+        for dbname in com.plexapp.plugins.library.db com.plexapp.plugins.library.blobs.db; do
+          cat "${cfg.driverFetch.plexPackage.basedb}" > "$dbdir/$dbname"
+          rm -f "$dbdir/$dbname-shm" "$dbdir/$dbname-wal"
+        done
+
         echo "starting throwaway PMS to trigger the Drivers download..."
         "${cfg.driverFetch.plexPackage}/lib/plexmediaserver/Plex Media Server" &
         pms=$!
@@ -185,7 +197,9 @@ in
 
         driver=""
         for _ in $(seq 1 300); do
-          driver=$(find "$pms_dir/Drivers" -path '*ihd-*' -name 'iHD_drv_video.so' 2>/dev/null | head -n1 || true)
+          # The bundle dir is named imd-<hash> (intel-media-driver), not
+          # ihd-*; match on the driver file alone.
+          driver=$(find "$pms_dir/Drivers" -name 'iHD_drv_video.so' 2>/dev/null | head -n1 || true)
           [ -n "$driver" ] && break
           sleep 5
         done

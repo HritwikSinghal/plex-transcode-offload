@@ -200,9 +200,10 @@ func (j *job) prepare() (argv, env []string, err error) {
 			return nil, nil, fmt.Errorf("media %d: unknown mode %q", idx, ref.Mode)
 		}
 	}
-	// argv[0] is the master-side transcoder path; the worker substitutes
-	// its own cfg.transcoder_path at spawn.
-	argv, err = substituteArgv(j.req.Argv[1:], j.outDir, j.d.proxyBase(j.id), j.d.cfg.PlexDir, values)
+	// req.Argv carries only the transcoder ARGUMENTS: the shim strips the
+	// program token (os.Args[1:]) before dispatch, and the worker spawns
+	// its own cfg.transcoder_path. Slicing here would eat the first flag.
+	argv, err = substituteArgv(j.req.Argv, j.outDir, j.d.proxyBase(j.id), j.d.cfg.PlexDir, values)
 	if err != nil {
 		return nil, nil, err
 	}
