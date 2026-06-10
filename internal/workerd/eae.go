@@ -1,9 +1,11 @@
 package workerd
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -94,6 +96,34 @@ func (d *daemon) runEAE(bin string) error {
 		return cmd.Process.Signal(syscall.SIGTERM)
 	}
 	cmd.WaitDelay = cancelGrace
+	// EAE diagnoses conversion failures (license, version, input parse)
+	// only on its stdout/stderr -- without this relay they vanish into
+	// /dev/null and a failed convert looks like a silent watchfolder no-op.
+	cmd.Stdout = &lineLogger{d: d, tag: "eae"}
+	cmd.Stderr = &lineLogger{d: d, tag: "eae"}
 	d.logf("eae: starting %s (root %s)", bin, d.cfg.EAERoot)
 	return cmd.Run()
+}
+
+// lineLogger forwards a child's output to the daemon log, one line per
+// entry (partial trailing lines are flushed as-is on the next write).
+type lineLogger struct {
+	d   *daemon
+	tag string
+	buf []byte
+}
+
+func (l *lineLogger) Write(p []byte) (int, error) {
+	l.buf = append(l.buf, p...)
+	for {
+		i := bytes.IndexByte(l.buf, '\n')
+		if i < 0 {
+			break
+		}
+		if line := strings.TrimRight(string(l.buf[:i]), "\r"); line != "" {
+			l.d.logf("%s: %s", l.tag, line)
+		}
+		l.buf = l.buf[i+1:]
+	}
+	return len(p), nil
 }
