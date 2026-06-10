@@ -117,6 +117,16 @@ func newJob(d *daemon, req protocol.JobRequest) (*job, error) {
 // goroutine; every exit path ends in finalize.
 func (j *job) run() {
 	j.setState(protocol.JobPreparing)
+	// Top up the codec cache against the master's CURRENT manifest: PMS
+	// downloads decoders on demand, so this session may need a lib the
+	// master acquired after our last sync. Best-effort -- a sync error
+	// means running with the cached set, which at worst reproduces the
+	// fast transcoder failure the sync exists to prevent.
+	syncCtx, cancelSync := context.WithTimeout(j.procCtx, codecSyncWait)
+	if err := j.d.provisionBuild(syncCtx, j.req.PlexBuild); err != nil {
+		j.d.logf("job %s: codec sync: %v (continuing with cached set)", j.id, err)
+	}
+	cancelSync()
 	argv, env, err := j.prepare()
 	if err != nil {
 		j.publishStderr("prt: prepare failed: " + err.Error())

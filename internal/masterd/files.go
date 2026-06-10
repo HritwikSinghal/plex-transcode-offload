@@ -57,18 +57,28 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
 
-// codecCache serves the master's Codecs dir per build, caching each build's
-// manifest (name/size/sha256 of the top-level regular files) after the first
-// computation. Only flat names are served -- /v1/codecs/{build}/files/{name}
-// forbids path separators by contract.
+// codecCache serves the master's Codecs dir per build. PMS grows that dir
+// ON DEMAND -- a new media's first play can download e.g. libac3_decoder.so
+// seconds before the job dispatches -- so the manifest is rebuilt from a
+// fresh directory scan on every request; only the sha256 sums are memoized,
+// keyed by (path, size, mtime). Only flat names are served --
+// /v1/codecs/{build}/files/{name} forbids path separators by contract.
 type codecCache struct {
-	dir       string
-	mu        sync.Mutex
-	manifests map[string]*protocol.CodecsManifest
+	dir    string
+	mu     sync.Mutex
+	hashes map[string]codecHash
+}
+
+// codecHash memoizes one file's sha256; size+mtime must still match for the
+// cached sum to be reused.
+type codecHash struct {
+	size    int64
+	modTime time.Time
+	sum     string
 }
 
 func newCodecCache(dir string) *codecCache {
-	return &codecCache{dir: dir, manifests: make(map[string]*protocol.CodecsManifest)}
+	return &codecCache{dir: dir, hashes: make(map[string]codecHash)}
 }
 
 // safeName accepts a single path component: no separators, no traversal.
@@ -114,14 +124,11 @@ func (c *codecCache) resolveDir(build string) (string, error) {
 	return best, nil
 }
 
-// manifest returns the (possibly cached) manifest for build. fs.ErrNotExist
-// is returned when no codec dir resolves for it.
+// manifest returns the manifest for build, scanning the directory afresh on
+// every call. fs.ErrNotExist is returned when no codec dir resolves for it.
 func (c *codecCache) manifest(build string) (*protocol.CodecsManifest, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if m, ok := c.manifests[build]; ok {
-		return m, nil
-	}
 	dir, err := c.resolveDir(build)
 	if err != nil {
 		return nil, err
@@ -137,17 +144,21 @@ func (c *codecCache) manifest(build string) (*protocol.CodecsManifest, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		sum, err := sha256File(full)
-		if err != nil {
-			return nil, fmt.Errorf("hash %s: %w", full, err)
+		h, ok := c.hashes[full]
+		if !ok || h.size != info.Size() || !h.modTime.Equal(info.ModTime()) {
+			sum, err := sha256File(full)
+			if err != nil {
+				return nil, fmt.Errorf("hash %s: %w", full, err)
+			}
+			h = codecHash{size: info.Size(), modTime: info.ModTime(), sum: sum}
+			c.hashes[full] = h
 		}
 		m.Files = append(m.Files, protocol.CodecFile{
 			Name:   e.Name(),
 			Size:   info.Size(),
-			SHA256: sum,
+			SHA256: h.sum,
 		})
 	}
-	c.manifests[build] = m
 	return m, nil
 }
 

@@ -22,6 +22,11 @@ import (
 // of MB on a LAN).
 const provisionTimeout = 10 * time.Minute
 
+// codecSyncWait bounds how long a starting job waits for the per-job codec
+// top-up before proceeding with whatever is cached (the shared fetch keeps
+// running in the background).
+const codecSyncWait = 30 * time.Second
+
 // provisionRun deduplicates concurrent provisions of one build
 // (singleflight): the POST /v1/provision handler and background kicks from
 // cold-cache 503s share one fetch.
@@ -30,15 +35,16 @@ type provisionRun struct {
 	err  error
 }
 
-// provisionBuild ensures <data_dir>/codecs/<build> exists, fetching it from
-// masterd if cold. Blocks until the (possibly shared) fetch finishes or ctx
-// is done; the fetch itself continues in the background regardless.
+// provisionBuild syncs <data_dir>/codecs/<build> against the master's
+// manifest. Existence of the build dir is NOT enough: PMS downloads codec
+// libs on demand, so a new media's first play can add e.g.
+// libac3_decoder.so to the master seconds before the job dispatches. Every
+// call re-fetches the manifest and tops up what is missing. Blocks until
+// the (possibly shared) fetch finishes or ctx is done; the fetch itself
+// continues in the background regardless.
 func (d *daemon) provisionBuild(ctx context.Context, build string) error {
 	if !validID(build) {
 		return fmt.Errorf("workerd: invalid build %q", build)
-	}
-	if dirExists(d.codecsDir(build)) {
-		return nil
 	}
 	d.provMu.Lock()
 	run := d.prov[build]
@@ -63,9 +69,11 @@ func (d *daemon) provisionBuild(ctx context.Context, build string) error {
 }
 
 // fetchCodecs pulls the build's codec set from masterd: manifest, then each
-// file into <build>.partial with sha256 verification, then one atomic
-// rename into place. Integrity is checked HERE, at provision time only --
-// per-job verification is a bare stat.
+// missing file with sha256 verification and an atomic per-file rename into
+// place. A cold cache is assembled in <build>.partial and renamed as one
+// unit; a warm cache is topped up in place (only manifest entries that are
+// absent or size-changed locally are fetched). Integrity is checked HERE,
+// at provision time only -- per-job verification is a bare stat.
 func (d *daemon) fetchCodecs(build string) error {
 	ctx, cancel := context.WithTimeout(d.ctx, provisionTimeout)
 	defer cancel()
@@ -77,6 +85,9 @@ func (d *daemon) fetchCodecs(build string) error {
 	}
 
 	final := d.codecsDir(build)
+	if dirExists(final) {
+		return d.syncCodecs(ctx, build, manifest, final)
+	}
 	partial := final + ".partial"
 	if err := os.RemoveAll(partial); err != nil {
 		return fmt.Errorf("workerd: clean partial codecs dir: %w", err)
@@ -103,6 +114,32 @@ func (d *daemon) fetchCodecs(build string) error {
 	return nil
 }
 
+// syncCodecs tops up a warm codec dir: every manifest file that is absent
+// or size-changed locally is fetched and renamed into place. Name+size is a
+// sufficient identity check -- Plex codec files are immutable within a
+// build, so a matching size never hides changed content -- and a bare stat
+// per file keeps this per-job path nearly free.
+func (d *daemon) syncCodecs(ctx context.Context, build string, manifest protocol.CodecsManifest, final string) error {
+	fetched := 0
+	for _, cf := range manifest.Files {
+		if !safeRelPath(cf.Name) {
+			return fmt.Errorf("workerd: codecs manifest for %s: unsafe file name %q", build, cf.Name)
+		}
+		st, err := os.Stat(filepath.Join(final, filepath.FromSlash(cf.Name)))
+		if err == nil && st.Mode().IsRegular() && st.Size() == cf.Size {
+			continue
+		}
+		if err := d.fetchCodecFile(ctx, build, cf, final); err != nil {
+			return fmt.Errorf("workerd: codecs %s/%s: %w", build, cf.Name, err)
+		}
+		fetched++
+	}
+	if fetched > 0 {
+		d.logf("codec cache for build %s: synced %d new file(s)", build, fetched)
+	}
+	return nil
+}
+
 func (d *daemon) fetchCodecFile(ctx context.Context, build string, cf protocol.CodecFile, destRoot string) error {
 	target := d.masterURL() + "/v1/codecs/" + url.PathEscape(build) + "/files/" + escapePathSegments(cf.Name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -123,9 +160,12 @@ func (d *daemon) fetchCodecFile(ctx context.Context, build string, cf protocol.C
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	// 0755 for everything: the set is shared libraries plus the
-	// EasyAudioEncoder binary; the manifest carries no mode bits.
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	// Write-then-rename: warm-path syncs land in a live dir that a running
+	// transcoder may dlopen mid-download. 0755 for everything: the set is
+	// shared libraries plus the EasyAudioEncoder binary; the manifest
+	// carries no mode bits.
+	tmp := dest + ".fetching"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
 		return err
 	}
@@ -134,16 +174,19 @@ func (d *daemon) fetchCodecFile(ctx context.Context, build string, cf protocol.C
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil && n != cf.Size {
+		err = fmt.Errorf("size mismatch: got %d, manifest says %d", n, cf.Size)
+	}
+	if err == nil {
+		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, cf.SHA256) {
+			err = fmt.Errorf("sha256 mismatch: got %s, manifest says %s", got, cf.SHA256)
+		}
+	}
 	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	if n != cf.Size {
-		return fmt.Errorf("size mismatch: got %d, manifest says %d", n, cf.Size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, cf.SHA256) {
-		return fmt.Errorf("sha256 mismatch: got %s, manifest says %s", got, cf.SHA256)
-	}
-	return nil
+	return os.Rename(tmp, dest)
 }
 
 // getJSON GETs target with the shared bearer token and decodes the JSON
